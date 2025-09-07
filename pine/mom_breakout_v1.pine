@@ -1,0 +1,442 @@
+# HeavyBagsBeale SignalBot — Repo Skeleton (v0.2 with Grafana Starter)
+
+This version adds a **Grafana starter dashboard** wired into Docker Compose, connected to Postgres, with panels for PnL, trades, and hit rate.
+
+---
+
+## Directory Structure
+
+```
+heavybags-signalbot/
+├─ README.md
+├─ docker-compose.yml
+├─ .env.example
+├─ db/
+│  └─ init.sql
+├─ api/
+│  ├─ main.py
+│  ├─ requirements.txt
+│  └─ utils.py
+├─ worker/
+│  ├─ worker.py
+│  ├─ requirements.txt
+│  └─ risk.py
+├─ grafana/
+│  ├─ provisioning/
+│  │  ├─ datasources/datasource.yml
+│  │  └─ dashboards/dashboard.yml
+│  └─ dashboards/
+│     └─ signalbot.json
+├─ pine/
+│  └─ mom_breakout_v1.pine
+└─ scripts/
+   └─ gen_signature.py
+```
+
+---
+
+## README.md (updated)
+
+````markdown
+# HeavyBagsBeale SignalBot (v0.2)
+
+Signal → Risk → Paper Trade → Grafana Dashboards.
+
+## Quick Start
+
+### 1) Prereqs
+- Docker & Docker Compose
+- TradingView Premium (for multi-asset and webhooks)
+
+### 2) Configure env
+Copy `.env.example` → `.env` and set values.
+
+### 3) Bring up stack
+```bash
+docker compose up -d --build
+````
+
+This starts Postgres, Redis, API (FastAPI), Worker, and Grafana.
+
+### 4) Grafana
+
+* Runs on [http://localhost:3000](http://localhost:3000) (admin/admin default login).
+* Pre-provisioned Postgres datasource.
+* Preloaded dashboard: *SignalBot Overview* with panels for:
+
+  * Net PnL (cumulative)
+  * Number of Trades per day
+  * Win Rate (%)
+
+### 5) TradingView
+
+* Paste `pine/mom_breakout_v1.pine` into a new Pine strategy.
+* Add an **Alert** with JSON payload.
+* Point Webhook URL to API ingress.
+
+````
+
+---
+
+## docker-compose.yml (updated with Grafana)
+```yaml
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  api:
+    build: ./api
+    environment:
+      - HMAC_SECRET=${HMAC_SECRET}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/0
+      - ENV=local
+    depends_on:
+      - db
+      - redis
+    ports:
+      - "8000:8000"
+
+  worker:
+    build: ./worker
+    environment:
+      - HMAC_SECRET=${HMAC_SECRET}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/0
+      - MAX_DAILY_LOSS_PCT=4
+      - MAX_RISK_PCT=1
+    depends_on:
+      - db
+      - redis
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - db
+
+volumes:
+  db_data:
+````
+
+---
+
+## grafana/provisioning/datasources/datasource.yml
+
+```yaml
+apiVersion: 1
+
+datasources:
+  - name: Postgres
+    type: postgres
+    access: proxy
+    url: db:5432
+    database: ${POSTGRES_DB}
+    user: ${POSTGRES_USER}
+    secureJsonData:
+      password: ${POSTGRES_PASSWORD}
+    jsonData:
+      sslmode: "disable"
+```
+
+---
+
+## grafana/provisioning/dashboards/dashboard.yml
+
+```yaml
+apiVersion: 1
+
+providers:
+  - name: 'SignalBot Dashboards'
+    orgId: 1
+    folder: ''
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
+```
+
+---
+
+## grafana/dashboards/signalbot.json
+
+```json
+{
+  "id": null,
+  "title": "SignalBot Overview",
+  "timezone": "browser",
+  "panels": [
+    {
+      "title": "Cumulative PnL",
+      "type": "timeseries",
+      "targets": [
+        {
+          "rawSql": "SELECT fill_ts AS time, SUM(realized_pnl) OVER (ORDER BY fill_ts) AS pnl FROM trades ORDER BY fill_ts",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "usd" },
+        "overrides": []
+      },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 }
+    },
+    {
+      "title": "Trades per Day",
+      "type": "bargauge",
+      "targets": [
+        {
+          "rawSql": "SELECT DATE(fill_ts) AS time, COUNT(*) AS trades FROM trades GROUP BY DATE(fill_ts) ORDER BY time",
+          "refId": "B",
+          "format": "time_series"
+        }
+      ],
+      "gridPos": { "x": 0, "y": 8, "w": 6, "h": 6 }
+    },
+    {
+      "title": "Win Rate %",
+      "type": "stat",
+      "targets": [
+        {
+          "rawSql": "SELECT NOW() AS time, 100.0 * SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*),0) AS win_rate FROM trades",
+          "refId": "C",
+          "format": "time_series"
+        }
+      ],
+      "gridPos": { "x": 6, "y": 8, "w": 6, "h": 6 }
+    }
+  ],
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "10s"
+}
+```
+
+---
+
+## Notes
+
+* Grafana auto-loads **SignalBot Overview** on startup.
+* Panels use raw SQL queries against Postgres.
+* Extend dashboard with drawdown, expectancy, equity curve by adding SQL.
+* Default login: `admin/admin` (change via env vars in compose).
+
+---
+
+# Grafana Starter (v0.1)
+
+## Updated docker-compose.yml (with Grafana service)
+
+```yaml
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  api:
+    build: ./api
+    environment:
+      - HMAC_SECRET=${HMAC_SECRET}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/0
+      - ENV=local
+    depends_on:
+      - db
+      - redis
+    ports:
+      - "8000:8000"
+
+  worker:
+    build: ./worker
+    environment:
+      - HMAC_SECRET=${HMAC_SECRET}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/0
+      - MAX_DAILY_LOSS_PCT=4
+      - MAX_RISK_PCT=1
+    depends_on:
+      - db
+      - redis
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - db
+
+volumes:
+  db_data:
+  grafana_data:
+```
+
+## .env additions
+
+```env
+GRAFANA_ADMIN_PASSWORD=change_me_too
+```
+
+## Create files
+
+```
+mkdir -p grafana/provisioning/datasources grafana/provisioning/dashboards grafana/dashboards
+```
+
+### grafana/provisioning/datasources/datasource.yml
+
+```yaml
+apiVersion: 1
+
+datasources:
+  - name: SignalBot Postgres
+    type: postgres
+    access: proxy
+    isDefault: true
+    editable: true
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: ${POSTGRES_PASSWORD}
+    url: db:5432
+    user: ${POSTGRES_USER}
+    database: ${POSTGRES_DB}
+```
+
+### grafana/provisioning/dashboards/dashboard.yml
+
+```yaml
+apiVersion: 1
+providers:
+  - name: 'SignalBot'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards
+```
+
+### grafana/dashboards/signalbot\_overview\.json
+
+```json
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Equity (Cumulative Realized PnL) & Daily PnL",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "postgres", "uid": "SignalBot Postgres"},
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('day', t.fill_ts) AS time, SUM(t.realized_pnl) OVER (ORDER BY date_trunc('day', t.fill_ts)) AS equity FROM trades t ORDER BY time;"
+        },
+        {
+          "refId": "B",
+          "datasource": {"type": "postgres", "uid": "SignalBot Postgres"},
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('day', t.fill_ts) AS time, SUM(t.realized_pnl) AS daily_pnl FROM trades t GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}}
+    },
+    {
+      "type": "stat",
+      "title": "Total Trades",
+      "targets": [
+        {"refId": "A", "datasource": {"type": "postgres", "uid": "SignalBot Postgres"}, "rawSql": "SELECT count(*) AS total_trades FROM trades;"}
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Trades by Strategy (Signals)",
+      "targets": [
+        {"refId": "A", "datasource": {"type": "postgres", "uid": "SignalBot Postgres"}, "rawSql": "SELECT strategy AS metric, COUNT(*)::numeric AS value FROM signals GROUP BY 1 ORDER BY 2 DESC;"}
+      ]
+    },
+    {
+      "type": "gauge",
+      "title": "Win Rate (Realized > 0)",
+      "targets": [
+        {"refId": "A", "datasource": {"type": "postgres", "uid": "SignalBot Postgres"}, "rawSql": "WITH w AS (SELECT CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END AS win FROM trades) SELECT (SUM(win)::float / NULLIF(COUNT(*),0))*100 AS win_rate FROM w;"}
+      ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": ""}}
+    }
+  ],
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["signalbot"],
+  "templating": {"list": []},
+  "time": {"from": "now-30d", "to": "now"},
+  "timezone": "browser",
+  "title": "SignalBot Overview",
+  "version": 1
+}
+```
+
+## How to use
+
+1. Add `GRAFANA_ADMIN_PASSWORD` to `.env`.
+2. Create directories and files as above (already included if you cloned from this doc).
+3. `docker compose up -d --build`
+4. Open **[http://localhost:3000](http://localhost:3000)** → login `admin` / your password.
+5. Dashboard auto-loads under home: **SignalBot Overview**.
+
+## Notes
+
+* This starter reads from `trades` and `signals`. In paper mode, realized PnL is zero until you implement exit logic that records PnL; you can temporarily simulate PnL to test panels.
+* Later, wire Prometheus + node\_exporter for CPU/mem metrics, and CloudWatch on AWS.

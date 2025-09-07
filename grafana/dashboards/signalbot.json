@@ -1,0 +1,50 @@
+{
+"id": null,
+"title": "SignalBot Overview",
+"timezone": "browser",
+"panels": [
+{
+"title": "Cumulative PnL",
+"type": "timeseries",
+"targets": [
+{
+"rawSql": "SELECT fill_ts AS time, SUM(realized_pnl) OVER (ORDER BY fill_ts) AS pnl FROM trades ORDER BY fill_ts",
+"refId": "A",
+"format": "time_series"
+}
+],
+"fieldConfig": {
+"defaults": { "unit": "usd" },
+"overrides": []
+},
+"gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 }
+},
+{
+"title": "Trades per Day",
+"type": "bargauge",
+"targets": [
+{
+"rawSql": "SELECT DATE(fill_ts) AS time, COUNT(*) AS trades FROM trades GROUP BY DATE(fill_ts) ORDER BY time",
+"refId": "B",
+"format": "time_series"
+}
+],
+"gridPos": { "x": 0, "y": 8, "w": 6, "h": 6 }
+},
+{
+"title": "Win Rate %",
+"type": "stat",
+"targets": [
+{
+"rawSql": "SELECT NOW() AS time, 100.0 * SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*),0) AS win_rate FROM trades",
+"refId": "C",
+"format": "time_series"
+}
+],
+"gridPos": { "x": 6, "y": 8, "w": 6, "h": 6 }
+}
+],
+"schemaVersion": 36,
+"version": 1,
+"refresh": "10s"
+}
